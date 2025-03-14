@@ -51,23 +51,29 @@ impl AIPA {
             fs::read_to_string(self.project_dir.join(&filename))?
         };
 
+        let mut result_msg = String::new();
         for attempt in 1..=MAX_ATTEMPTS {
             let result = self.execute_code(&task, &filename)?;
             if result.success {
-                return Ok(format!("Success! Output: {}", result.output));
+                result_msg = format!("Success! Output: {}", result.output);
+                break;
             }
 
             let error_msg = result.error.unwrap_or("Unknown error".to_string());
             println!("Attempt {}/{} failed: {}", attempt, MAX_ATTEMPTS, error_msg);
 
             if attempt == MAX_ATTEMPTS {
-                return Ok(format!("Error after {} attempts: {}", MAX_ATTEMPTS, error_msg));
+                result_msg = format!("Error after {} attempts: {}", MAX_ATTEMPTS, error_msg);
+                break;
             }
 
             code = self.prompt_for_fix(&task, &code, &error_msg)?;
             filename = self.save_code(&task, &code)?;
         }
-        unreachable!("Loop should exit via return");
+
+        // Cleanup after completion (success or max attempts)
+        self.cleanup(&task)?;
+        Ok(result_msg)
     }
 
     fn generate_code(&self, task: &Task) -> Result<String> {
@@ -129,6 +135,26 @@ int main() {{
             println!("Saved code:\n{}", code);
         }
         Ok(filename)
+    }
+
+    fn cleanup(&self, task: &Task) -> Result<()> {
+        let filename = self.get_filename(task);
+        let source_path = self.project_dir.join(&filename);
+        let binary_path = source_path.with_extension("");
+        
+        if source_path.exists() {
+            fs::remove_file(&source_path)?;
+            if self.debug {
+                println!("Removed source file: {:?}", source_path);
+            }
+        }
+        if binary_path.exists() {
+            fs::remove_file(&binary_path)?;
+            if self.debug {
+                println!("Removed binary: {:?}", binary_path);
+            }
+        }
+        Ok(())
     }
 
     fn execute_code(&self, task: &Task, filename: &String) -> Result<ExecutionResult> {
