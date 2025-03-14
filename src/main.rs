@@ -10,7 +10,7 @@ use clap::{Parser};
 #[derive(Parser, Debug)]
 #[command(author, version, about = "AI Programming Agent (AIPA)", long_about = None)]
 struct Args {
-    #[arg(short, long, help = "Programming language (e.g., rust, python, cpp)")]
+    #[arg(short, long, help = "Programming language (e.g., rust, python, cpp, java)")]
     language: String,
     #[arg(short, long, help = "Task goal (e.g., 'print hello')")]
     goal: String,
@@ -71,7 +71,6 @@ impl AIPA {
             filename = self.save_code(&task, &code)?;
         }
 
-        // Cleanup after completion (success or max attempts)
         self.cleanup(&task)?;
         Ok(result_msg)
     }
@@ -79,16 +78,16 @@ impl AIPA {
     fn generate_code(&self, task: &Task) -> Result<String> {
         match task.language.as_str() {
             "rust" => Ok(format!(
-                r#"fn main() {{ println!("AIPA: {} completed"); }}"#,
+                "fn main() {{ println!(\"AIPA: {} completed\"); }}",
                 task.goal
             )),
             "python" => Ok(format!("print('AIPA: {} completed')", task.goal)),
             "cpp" => Ok(format!(
-                r#"#include <iostream>
-int main() {{
-    std::cout << "AIPA: {} completed" << std::endl;
-    return 0;
-}}"#,
+                "#include <iostream>\nint main() {{\n    std::cout << \"AIPA: {} completed\" << std::endl;\n    return 0;\n}}",
+                task.goal
+            )),
+            "java" => Ok(format!(
+                "public class project_print_hello {{\n    public static void main(String[] args) {{\n        System.out.println(\"AIPA: {} completed\");\n    }}\n}}",
                 task.goal
             )),
             _ => Ok(format!("# Unsupported language: {}", task.language)),
@@ -99,19 +98,24 @@ int main() {{
         println!("Task: {} in {}", task.goal, task.language);
         println!("Original code:\n{}", old_code);
         println!("Error: {}", error);
-        println!("Enter fixed code (press Enter twice to submit):");
-        print!("> ");
-        io::stdout().flush()?;
+        println!("Enter fixed code below (press Enter twice on a blank line to submit):");
 
         let mut fixed_code = String::new();
         let stdin = io::stdin();
         loop {
+            print!("> ");
+            io::stdout().flush()?;
             let mut line = String::new();
             stdin.read_line(&mut line)?;
-            if line.trim().is_empty() && !fixed_code.trim().is_empty() {
-                break; // Empty line after content ends input
+            let trimmed_line = line.trim();
+            if trimmed_line.is_empty() && !fixed_code.trim().is_empty() {
+                break;
             }
-            fixed_code.push_str(&line);
+            if !trimmed_line.is_empty() && trimmed_line != ">" && !trimmed_line.starts_with("Enter fixed code") {
+                let clean_line = trimmed_line.trim_start_matches("> ").trim_start_matches(">");
+                fixed_code.push_str(clean_line);
+                fixed_code.push('\n');
+            }
         }
         Ok(fixed_code.trim().to_string())
     }
@@ -121,6 +125,7 @@ int main() {{
             "rust" => "rs",
             "python" => "py",
             "cpp" => "cpp",
+            "java" => "java",
             _ => "txt",
         };
         format!("project_{}.{}", task.goal.replace(" ", "_"), ext)
@@ -141,7 +146,8 @@ int main() {{
         let filename = self.get_filename(task);
         let source_path = self.project_dir.join(&filename);
         let binary_path = source_path.with_extension("");
-        
+        let java_class_prefix = "project_print_hello";
+
         if source_path.exists() {
             fs::remove_file(&source_path)?;
             if self.debug {
@@ -152,6 +158,18 @@ int main() {{
             fs::remove_file(&binary_path)?;
             if self.debug {
                 println!("Removed binary: {:?}", binary_path);
+            }
+        }
+        if task.language == "java" {
+            for entry in fs::read_dir(&self.project_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() && path.file_stem().map(|s| s.to_string_lossy().starts_with(java_class_prefix)).unwrap_or(false) && path.extension().map(|e| e == "class").unwrap_or(false) {
+                    fs::remove_file(&path)?;
+                    if self.debug {
+                        println!("Removed class file: {:?}", path);
+                    }
+                }
             }
         }
         Ok(())
@@ -306,6 +324,68 @@ int main() {{
                 let run = Command::new(&absolute_path)
                     .output()
                     .map_err(|e| anyhow::anyhow!("Failed to execute binary: {}", e))?;
+                Ok(ExecutionResult {
+                    success: run.status.success(),
+                    output: String::from_utf8_lossy(&run.stdout).to_string(),
+                    error: if run.status.success() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&run.stderr).to_string())
+                    },
+                })
+            }
+            "java" => {
+                let class_name = "project_print_hello";
+                let class_file = self.project_dir.join(format!("{}.class", class_name));
+                if class_file.exists() {
+                    fs::remove_file(&class_file)?;
+                    if self.debug {
+                        println!("Removed old class file: {:?}", class_file);
+                    }
+                }
+                if self.debug {
+                    println!("Source file: {:?}", filepath);
+                    println!("Class name: {}", class_name);
+                    println!("Current dir: {:?}", std::env::current_dir()?);
+                    println!("Compiling: javac {}", filepath.display());
+                }
+                let compile = Command::new("javac")
+                    .arg(&filepath)
+                    .current_dir(&self.project_dir)
+                    .output()?;
+                if self.debug {
+                    println!("Compile stdout: {}", String::from_utf8_lossy(&compile.stdout));
+                    println!("Compile stderr: {}", String::from_utf8_lossy(&compile.stderr));
+                    println!("Compile exit code: {:?}", compile.status);
+                }
+                if !compile.status.success() {
+                    return Ok(ExecutionResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(String::from_utf8_lossy(&compile.stderr).to_string()),
+                    });
+                }
+                if self.debug {
+                    println!("Checking for class file at: {:?}", class_file);
+                }
+                if !class_file.exists() {
+                    if self.debug {
+                        println!("Class file not found at: {:?}", class_file);
+                    }
+                    return Ok(ExecutionResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Class file not created at {:?}", class_file)),
+                    });
+                }
+                if self.debug {
+                    println!("Class file exists: {:?}", class_file);
+                    println!("Running: java {}", class_name);
+                }
+                let run = Command::new("java")
+                    .arg(&class_name)
+                    .current_dir(&self.project_dir)
+                    .output()?;
                 Ok(ExecutionResult {
                     success: run.status.success(),
                     output: String::from_utf8_lossy(&run.stdout).to_string(),
