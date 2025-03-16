@@ -77,7 +77,8 @@ Feel free to fork, submit issues, or send pull requests! Key areas for improveme
 
 License
 
-This project is unlicensed—free to use, modify, and distribute as you see fit.
+MIT
+
 Acknowledgments
 
 Built with help from Grok (xAI) for rapid prototyping and debugging.
