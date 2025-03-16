@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::io::{self, Write};
 use dirs::home_dir;
 use clap::{Parser};
+use reqwest::Client;
+use serde_json::{json, Value};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "AI Programming Agent (AIPA)", long_about = None)]
@@ -27,6 +29,8 @@ struct Task {
 struct AIPA {
     project_dir: PathBuf,
     debug: bool,
+    client: Client,
+    api_key: String,
 }
 
 impl AIPA {
@@ -37,14 +41,20 @@ impl AIPA {
         if debug {
             println!("Project dir: {:?}", project_dir);
         }
-        Ok(AIPA { project_dir, debug })
+        let api_key = std::env::var("XAI_API_KEY").context("XAI_API_KEY environment variable not set")?;
+        Ok(AIPA {
+            project_dir,
+            debug,
+            client: Client::new(),
+            api_key,
+        })
     }
 
-    fn process_task(&self, task: Task) -> Result<String> {
+    async fn process_task(&self, task: Task) -> Result<String> {
         const MAX_ATTEMPTS: usize = 3;
         let mut filename = self.get_filename(&task);
         let mut code = if !self.project_dir.join(&filename).exists() {
-            let initial_code = self.generate_code(&task)?;
+            let initial_code = self.generate_code(&task).await?;
             self.save_code(&task, &initial_code)?;
             initial_code
         } else {
@@ -75,23 +85,50 @@ impl AIPA {
         Ok(result_msg)
     }
 
-    fn generate_code(&self, task: &Task) -> Result<String> {
-        match task.language.as_str() {
-            "rust" => Ok(format!(
-                "fn main() {{ println!(\"AIPA: {} completed\"); }}",
-                task.goal
-            )),
-            "python" => Ok(format!("print('AIPA: {} completed')", task.goal)),
-            "cpp" => Ok(format!(
-                "#include <iostream>\nint main() {{\n    std::cout << \"AIPA: {} completed\" << std::endl;\n    return 0;\n}}",
-                task.goal
-            )),
-            "java" => Ok(format!(
-                "public class project_print_hello {{\n    public static void main(String[] args) {{\n        System.out.println(\"AIPA: {} completed\");\n    }}\n}}",
-                task.goal
-            )),
-            _ => Ok(format!("# Unsupported language: {}", task.language)),
+    async fn generate_code(&self, task: &Task) -> Result<String> {
+        let prompt = format!(
+            "Generate a {} program named `project_print_hello` that achieves the goal: '{}'. Provide only the code, no explanations.",
+            task.language, task.goal
+        );
+        let response = self.client
+            .post("https://api.x.ai/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "model": "grok-2-1212",
+                "messages": [
+                    {"role": "system", "content": "You are a code generator."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500
+            }))
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+
+        let raw_code = response["choices"][0]["message"]["content"]
+            .as_str()
+            .context("Failed to extract code from API response")?
+            .to_string();
+
+        let clean_code: String = raw_code
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.starts_with("```") && !trimmed.starts_with("//") && !trimmed.is_empty()
+            })
+            .collect::<Vec<&str>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        if self.debug {
+            println!("Raw API response: {}", raw_code);
+            println!("Cleaned code: {}", clean_code);
         }
+
+        Ok(clean_code)
     }
 
     fn prompt_for_fix(&self, task: &Task, old_code: &String, error: &String) -> Result<String> {
@@ -242,11 +279,7 @@ impl AIPA {
                 Ok(ExecutionResult {
                     success: run.status.success(),
                     output: String::from_utf8_lossy(&run.stdout).to_string(),
-                    error: if run.status.success() {
-                        None
-                    } else {
-                        Some(String::from_utf8_lossy(&run.stderr).to_string())
-                    },
+                    error: if run.status.success() { None } else { Some(String::from_utf8_lossy(&run.stderr).to_string()) },
                 })
             }
             "python" => {
@@ -256,11 +289,7 @@ impl AIPA {
                 Ok(ExecutionResult {
                     success: run.status.success(),
                     output: String::from_utf8_lossy(&run.stdout).to_string(),
-                    error: if run.status.success() {
-                        None
-                    } else {
-                        Some(String::from_utf8_lossy(&run.stderr).to_string())
-                    },
+                    error: if run.status.success() { None } else { Some(String::from_utf8_lossy(&run.stderr).to_string()) },
                 })
             }
             "cpp" => {
@@ -327,11 +356,7 @@ impl AIPA {
                 Ok(ExecutionResult {
                     success: run.status.success(),
                     output: String::from_utf8_lossy(&run.stdout).to_string(),
-                    error: if run.status.success() {
-                        None
-                    } else {
-                        Some(String::from_utf8_lossy(&run.stderr).to_string())
-                    },
+                    error: if run.status.success() { None } else { Some(String::from_utf8_lossy(&run.stderr).to_string()) },
                 })
             }
             "java" => {
@@ -389,11 +414,7 @@ impl AIPA {
                 Ok(ExecutionResult {
                     success: run.status.success(),
                     output: String::from_utf8_lossy(&run.stdout).to_string(),
-                    error: if run.status.success() {
-                        None
-                    } else {
-                        Some(String::from_utf8_lossy(&run.stderr).to_string())
-                    },
+                    error: if run.status.success() { None } else { Some(String::from_utf8_lossy(&run.stderr).to_string()) },
                 })
             }
             _ => Ok(ExecutionResult {
@@ -412,7 +433,8 @@ struct ExecutionResult {
     error: Option<String>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
     let aipa = AIPA::new(args.debug)?;
     
@@ -421,7 +443,7 @@ fn main() -> Result<()> {
         goal: args.goal,
     };
     
-    let result = aipa.process_task(task)?;
+    let result = aipa.process_task(task).await?;
     println!("{}", result);
     
     Ok(())
